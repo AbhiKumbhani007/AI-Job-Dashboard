@@ -6,7 +6,7 @@ import { JobStatus, Tone } from "@/generated/prisma/enums";
 import { action, ActionError } from "@/lib/action";
 import { createApplicationFromDocuments } from "@/lib/application-create";
 import { matchSchema } from "@/lib/application-data";
-import { handOffPastedPosting } from "@/lib/connector/handoff";
+import { applicationFromPaste, handOffPastedPosting, handOffPastedPostingToCode } from "@/lib/connector/handoff";
 import { readPostingJob } from "@/lib/jobs/read-posting";
 import { startJob } from "@/lib/jobs/runner";
 import { writeDocumentsJob } from "@/lib/jobs/write-documents";
@@ -30,7 +30,25 @@ export const handOffToClaude = action(
     posting: z.string().trim().min(1, "Paste a job posting first.").max(100_000),
     postingUrl: z.string().trim().max(2000),
   }),
-  async ({ posting, postingUrl }) => ({ url: await handOffPastedPosting({ text: posting, url: /^https?:\/\//i.test(postingUrl) ? postingUrl : "" }) }),
+  ({ posting, postingUrl }) => handOffPastedPosting({ text: posting, url: /^https?:\/\//i.test(postingUrl) ? postingUrl : "" }),
+);
+
+/**
+ * While New application waits for Claude: the application it saved from the pasted posting, or null while it
+ * hasn't (#221). The page asks every few seconds and offers to open it.
+ */
+export const checkClaudeDraft = action(z.object({ pasteId: z.string().min(1).max(100) }), async ({ pasteId }) => ({ applicationId: await applicationFromPaste(pasteId) }));
+
+/**
+ * "Open in Claude Code": the same hand-off, for Claude Code in Terminal. Keeps the posting for the connector
+ * to read and gives the prompt to copy and the link the DossierClaude helper app on the user's Mac opens.
+ */
+export const handOffToClaudeCode = action(
+  z.object({
+    posting: z.string().trim().min(1, "Paste a job posting first.").max(100_000),
+    postingUrl: z.string().trim().max(2000),
+  }),
+  ({ posting, postingUrl }) => handOffPastedPostingToCode({ text: posting, url: /^https?:\/\//i.test(postingUrl) ? postingUrl : "" }),
 );
 
 const detailsSchema = z.object({

@@ -18,6 +18,7 @@ import { saveVersion } from "@/lib/document-versions";
 import { refineJob, refineJobKey } from "@/lib/jobs/refine";
 import { regenerateUnitJob, unitJobKey } from "@/lib/jobs/regenerate-unit";
 import { findUnfinishedJobs, startJob } from "@/lib/jobs/runner";
+import { handOffEmailToCode } from "@/lib/connector/handoff";
 import { emailJobKey, writeEmailJob } from "@/lib/jobs/write-email";
 import { prisma } from "@/lib/prisma";
 import { findOrCreateSkill } from "@/lib/profile-entries";
@@ -493,6 +494,16 @@ export const startWritingEmail = action(z.object({ id: z.string().min(1) }), asy
   if (!(await isAiConfigured())) throw new ActionError("That needs an AI provider. Choose one in Settings → AI provider.");
   const [running] = await findUnfinishedJobs(emailJobKey(id));
   return running?.id ?? startJob(writeEmailJob, { applicationId: id }, { key: emailJobKey(id), applicationId: id });
+});
+
+/**
+ * "Open in Claude Code" on the Email tab (#221, the connector on and no AI model of Dossier's own): the prompt
+ * to copy and the link the DossierClaude helper app on the user's Mac opens, which continues the Claude Code
+ * session that wrote the application when it can.
+ */
+export const handOffEmailToClaudeCode = action(z.object({ id: z.string().min(1) }), async ({ id }) => {
+  if (!(await prisma.application.count({ where: { id } }))) throw new ActionError(GONE);
+  return handOffEmailToCode(id);
 });
 
 /**

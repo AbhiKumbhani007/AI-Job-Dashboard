@@ -64,36 +64,52 @@ export const writeEmailJob = defineJob({
       { ...options, language: application.language || options.language, signal },
     );
 
-    const startupTo = startupAddress(application.startup?.emails);
-    const withTo = (units: Unit[], kept = "") =>
-      units.map((unit) => (unit.id === "to" && !unit.text && (kept || startupTo) ? { ...unit, text: kept || startupTo } : unit));
-
-    if (!unitsOf(DocumentKind.EMAIL)) {
-      try {
-        await prisma.$transaction(async (tx) => {
-          const document = await tx.document.create({ data: { applicationId, kind: DocumentKind.EMAIL, units: withTo(data), writtenWith: promptVersion } });
-          await saveVersion(tx, document.id, withTo(data), { cause: VersionCause.WRITTEN });
-        });
-        return { units: withTo(data), previous: null };
-      } catch (error) {
-        // Written meanwhile: write over it, as below.
-        if (!(error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002")) throw error;
-      }
-    }
-
-    const written = await updateDocuments(
-      applicationId,
-      async (documents) => {
-        const previous = documents[DocumentKind.EMAIL] ?? [];
-        const units = withTo(data, emailParts(previous).to);
-        documents[DocumentKind.EMAIL] = units;
-        return { units, previous };
-      },
-      { version: { cause: VersionCause.WRITTEN } },
-    );
-    await prisma.document.updateMany({ where: { applicationId, kind: DocumentKind.EMAIL }, data: { writtenWith: promptVersion } });
-    return written;
+    return storeEmail(application, data, promptVersion);
   },
 });
 
 export type WriteEmailResult = z.infer<typeof writeEmailJob.result>;
+
+/**
+ * Keeps a written email as the application's EMAIL document, with a version of its own: the first one is
+ * created, a later one is written over it, keeping a recipient the posting doesn't give, which the user typed
+ * in. An application started from Startups gets the address the startup publishes (#222). The Claude connector's
+ * save_email keeps its emails the same way.
+ */
+export async function storeEmail(
+  application: { id: string; documents: { kind: DocumentKind; units: unknown }[]; startup: { emails: unknown } | null },
+  data: Unit[],
+  promptVersion: string,
+): Promise<{ units: Unit[]; previous: Unit[] | null }> {
+  const applicationId = application.id;
+  const emailExists = unitsSchema.safeParse(application.documents.find((document) => document.kind === DocumentKind.EMAIL)?.units).success;
+  const startupTo = startupAddress(application.startup?.emails);
+  const withTo = (units: Unit[], kept = "") =>
+    units.map((unit) => (unit.id === "to" && !unit.text && (kept || startupTo) ? { ...unit, text: kept || startupTo } : unit));
+
+  if (!emailExists) {
+    try {
+      await prisma.$transaction(async (tx) => {
+        const document = await tx.document.create({ data: { applicationId, kind: DocumentKind.EMAIL, units: withTo(data), writtenWith: promptVersion } });
+        await saveVersion(tx, document.id, withTo(data), { cause: VersionCause.WRITTEN });
+      });
+      return { units: withTo(data), previous: null };
+    } catch (error) {
+      // Written meanwhile: write over it, as below.
+      if (!(error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002")) throw error;
+    }
+  }
+
+  const written = await updateDocuments(
+    applicationId,
+    async (documents) => {
+      const previous = documents[DocumentKind.EMAIL] ?? [];
+      const units = withTo(data, emailParts(previous).to);
+      documents[DocumentKind.EMAIL] = units;
+      return { units, previous };
+    },
+    { version: { cause: VersionCause.WRITTEN } },
+  );
+  await prisma.document.updateMany({ where: { applicationId, kind: DocumentKind.EMAIL }, data: { writtenWith: promptVersion } });
+  return written;
+}

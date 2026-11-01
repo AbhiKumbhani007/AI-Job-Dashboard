@@ -27,11 +27,13 @@ import {
   setFollowThemeLayout,
   setShowPhoto,
   startRegenerating,
+  handOffEmailToClaudeCode,
   startWritingEmail,
   undoEmailRewrite,
   undoMessage,
   updateNote,
 } from "./actions";
+import { openAppLink } from "@/lib/claude-tab";
 import { ApplicationView, type ApplicationViewProps } from "./application-view";
 
 vi.mock("./actions", () => ({
@@ -54,9 +56,11 @@ vi.mock("./actions", () => ({
   loadVersion: vi.fn(),
   restoreVersion: vi.fn(async () => ({ ok: true, data: null, toast: "Restored the resume as it was then." })),
   startWritingEmail: vi.fn(async () => ({ ok: true, data: "email-1" })),
+  handOffEmailToClaudeCode: vi.fn(async () => ({ ok: true, data: { prompt: "Using my Dossier connector: write the email", link: "dossier-claude://email?application_id=app-1&session=s-1" } })),
   undoEmailRewrite: vi.fn(async () => ({ ok: true, data: null })),
 }));
 vi.mock("@/lib/copy-text", () => ({ copyText: vi.fn(async () => true) }));
+vi.mock("@/lib/claude-tab", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/claude-tab")>()), openAppLink: vi.fn() }));
 vi.mock("@/lib/jobs/actions", () => ({ retry: vi.fn(async () => ({ ok: true, data: null })) }));
 const router = vi.hoisted(() => ({ push: vi.fn(), refresh: vi.fn() }));
 vi.mock("next/navigation", () => ({ useRouter: () => router, usePathname: () => null }));
@@ -937,6 +941,50 @@ describe("the Email tab", () => {
     expect(toast).toHaveBeenLastCalledWith("That needs an AI provider. Choose one in Settings → AI provider.", {
       action: expect.objectContaining({ label: "Open Settings" }),
     });
+  });
+
+  it("offers Claude Code when Claude writes it, then waits for the email and shows it (#221)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      const { rerender } = render(<ApplicationView {...props} initialTab="email" writeInClaude />);
+      expect(screen.queryByRole("button", { name: "Write the email" })).not.toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Open in Claude Code" }));
+      expect(handOffEmailToClaudeCode).toHaveBeenCalledWith({ id: "app-1" });
+      expect(copyText).toHaveBeenCalledWith("Using my Dossier connector: write the email");
+      expect(openAppLink).toHaveBeenCalledWith("dossier-claude://email?application_id=app-1&session=s-1");
+      expect(screen.getByText(/Waiting for Claude to save the email/)).toBeInTheDocument();
+      expect(startWritingEmail).not.toHaveBeenCalled();
+
+      router.refresh.mockClear();
+      await act(() => vi.advanceTimersByTimeAsync(6000));
+      expect(router.refresh).toHaveBeenCalledTimes(2);
+
+      rerender(<ApplicationView {...props} initialTab="email" writeInClaude email={email} />);
+      expect(toast).toHaveBeenCalledWith("Claude saved the email.");
+      expect(within(screen.getByRole("article", { name: "Email" })).getByRole("group", { name: "Subject" })).toHaveTextContent("Application: Senior Product Designer");
+      router.refresh.mockClear();
+      await act(() => vi.advanceTimersByTimeAsync(6000));
+      expect(router.refresh).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops asking for Claude's email when told to stop waiting (#221)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      render(<ApplicationView {...props} initialTab="email" writeInClaude />);
+      await user.click(screen.getByRole("button", { name: "Open in Claude Code" }));
+      router.refresh.mockClear();
+      await user.click(screen.getByRole("button", { name: "Stop waiting" }));
+      expect(screen.getByRole("button", { name: "Open in Claude Code" })).toBeInTheDocument();
+      await act(() => vi.advanceTimersByTimeAsync(9000));
+      expect(router.refresh).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("keeps writing one started before a reload", () => {

@@ -9,7 +9,10 @@ import { addSkill } from "../profile/actions";
 
 import { cancel } from "@/lib/jobs/actions";
 
-import { createApplication, fetchPostingText, handOffToClaude, startReadingPosting, startWritingDocuments } from "./actions";
+import { openAppLink } from "@/lib/claude-tab";
+import { copyText } from "@/lib/copy-text";
+
+import { checkClaudeDraft, createApplication, fetchPostingText, handOffToClaude, handOffToClaudeCode, startReadingPosting, startWritingDocuments } from "./actions";
 import { NewApplication } from "./new-application";
 
 vi.mock("./actions", () => ({
@@ -18,7 +21,11 @@ vi.mock("./actions", () => ({
   createApplication: vi.fn(),
   fetchPostingText: vi.fn(),
   handOffToClaude: vi.fn(),
+  handOffToClaudeCode: vi.fn(),
+  checkClaudeDraft: vi.fn(),
 }));
+vi.mock("@/lib/copy-text", () => ({ copyText: vi.fn(async () => true) }));
+vi.mock("@/lib/claude-tab", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/claude-tab")>()), openAppLink: vi.fn() }));
 vi.mock("../profile/actions", () => ({ addSkill: vi.fn(async ({ name }: { name: string }) => ({ ok: true, data: { skill: { id: "s9", name }, added: true } })) }));
 vi.mock("@/lib/jobs/actions", () => ({ retry: vi.fn(async () => ({ ok: true, data: null })), cancel: vi.fn(async () => ({ ok: true, data: null })) }));
 vi.mock("@/components/toast", () => ({ toast: vi.fn(), toastResult: (result: unknown) => result }));
@@ -123,7 +130,7 @@ describe("the paste step (E7-1)", () => {
   it("hands the posting to a Claude chat when the connector is on and Dossier has no model (#221)", async () => {
     const tab = { closed: false, opener: {}, location: { href: "about:blank" }, close: vi.fn() };
     const open = vi.spyOn(window, "open").mockReturnValue(tab as unknown as Window);
-    vi.mocked(handOffToClaude).mockResolvedValue({ ok: true, data: { url: "https://claude.ai/new?q=write" } });
+    vi.mocked(handOffToClaude).mockResolvedValue({ ok: true, data: { url: "https://claude.ai/new?q=write", pasteId: "paste-1" } });
     render(<NewApplication {...props} aiReady={false} writeInClaude />);
     expect(screen.getByRole("note")).toHaveTextContent(/Dossier has no AI model of its own, so Claude writes this one/);
     await userEvent.type(screen.getByLabelText("Job posting"), "Ledgerly is hiring.");
@@ -135,8 +142,82 @@ describe("the paste step (E7-1)", () => {
     expect(tab.location.href).toBe("https://claude.ai/new?q=write");
     expect(tab.opener).toBeNull();
     expect(startReadingPosting).not.toHaveBeenCalled();
-    expect(toast).toHaveBeenCalledWith("Writing it in Claude. It shows up under Applications as a Draft once Claude has saved it.");
+    expect(toast).toHaveBeenCalledWith("Writing it in Claude. This page offers to open the draft once Claude has saved it.");
     open.mockRestore();
+  });
+
+  it("starts Claude Code in Terminal too: the prompt is copied and the helper app's link opens (#221)", async () => {
+    vi.mocked(handOffToClaudeCode).mockResolvedValue({ ok: true, data: { prompt: "Using my Dossier connector: write it", link: "dossier-claude://write?paste_id=abc", pasteId: "abc" } });
+    render(<NewApplication {...props} aiReady={false} writeInClaude />);
+    await userEvent.click(screen.getByRole("button", { name: "Open in Claude Code" }));
+    expect(toast).toHaveBeenCalledWith("Paste a job posting first.");
+    expect(handOffToClaudeCode).not.toHaveBeenCalled();
+
+    await userEvent.type(screen.getByLabelText("Job posting"), "Ledgerly is hiring.");
+    await userEvent.click(screen.getByRole("button", { name: "Open in Claude Code" }));
+    expect(handOffToClaudeCode).toHaveBeenCalledWith({ posting: "Ledgerly is hiring.", postingUrl: "" });
+    expect(copyText).toHaveBeenCalledWith("Using my Dossier connector: write it");
+    expect(openAppLink).toHaveBeenCalledWith("dossier-claude://write?paste_id=abc");
+    expect(toast).toHaveBeenCalledWith(expect.stringContaining("Opening Claude Code in Terminal"));
+    expect(startReadingPosting).not.toHaveBeenCalled();
+  });
+
+  it("waits for Claude's draft after the hand-off, then offers to open it, since Claude's route skips the other steps (#221)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      vi.mocked(handOffToClaudeCode).mockResolvedValue({ ok: true, data: { prompt: "p", link: "dossier-claude://write?paste_id=abc", pasteId: "abc" } });
+      vi.mocked(checkClaudeDraft)
+        .mockResolvedValueOnce({ ok: true, data: { applicationId: null } })
+        .mockResolvedValue({ ok: true, data: { applicationId: "app-9" } });
+      render(<NewApplication {...props} aiReady={false} writeInClaude />);
+      await user.type(screen.getByLabelText("Job posting"), "Ledgerly is hiring.");
+      const steps = screen.getByRole("list", { name: "New application steps" });
+      const current = () => steps.querySelector("[aria-current=step]")?.textContent;
+      expect(current()).toContain("Paste the posting");
+      await user.click(screen.getByRole("button", { name: "Open in Claude Code" }));
+      expect(screen.getByText(/Waiting for Claude to save the draft/)).toBeInTheDocument();
+      expect(current()).toContain("Claude writes it");
+
+      await act(() => vi.advanceTimersByTimeAsync(3000));
+      expect(checkClaudeDraft).toHaveBeenCalledWith({ pasteId: "abc" });
+      expect(screen.getByText(/Waiting for Claude to save the draft/)).toBeInTheDocument();
+
+      await act(() => vi.advanceTimersByTimeAsync(3000));
+      expect(screen.getByText(/Claude saved the draft/)).toBeInTheDocument();
+      expect(current()).toContain("Review the draft");
+      expect(toast).toHaveBeenCalledWith("Claude saved the draft.");
+      await user.click(screen.getByRole("button", { name: "Open the application →" }));
+      expect(router.push).toHaveBeenCalledWith("/applications/app-9");
+      // The posting that was pasted goes with it.
+      expect(sessionStorage.length).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops asking when told to stop waiting", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      vi.mocked(handOffToClaudeCode).mockResolvedValue({ ok: true, data: { prompt: "p", link: "dossier-claude://write?paste_id=abc", pasteId: "abc" } });
+      vi.mocked(checkClaudeDraft).mockClear();
+      vi.mocked(checkClaudeDraft).mockResolvedValue({ ok: true, data: { applicationId: null } });
+      render(<NewApplication {...props} aiReady={false} writeInClaude />);
+      await user.type(screen.getByLabelText("Job posting"), "Ledgerly is hiring.");
+      await user.click(screen.getByRole("button", { name: "Open in Claude Code" }));
+      await user.click(screen.getByRole("button", { name: "Stop waiting" }));
+      expect(screen.queryByText(/Waiting for Claude/)).not.toBeInTheDocument();
+      await act(() => vi.advanceTimersByTimeAsync(9000));
+      expect(checkClaudeDraft).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("only offers Claude Code when Claude writes the application", () => {
+    render(<NewApplication {...props} />);
+    expect(screen.queryByRole("button", { name: "Open in Claude Code" })).not.toBeInTheDocument();
   });
 });
 

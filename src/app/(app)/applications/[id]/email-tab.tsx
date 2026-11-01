@@ -34,6 +34,7 @@ export function EmailTab({
   notice,
   writing,
   onWrite,
+  claude,
   attachments,
   gmail,
 }: {
@@ -51,6 +52,11 @@ export function EmailTab({
   writing: boolean;
   /** "Write the email" and "Rewrite". */
   onWrite: () => void;
+  /**
+   * Claude writes what Dossier has no AI model for (#221): before the email is written, the tab offers to open
+   * Claude Code, which saves it here, and says it's waiting while the page asks for it.
+   */
+  claude?: { waiting: boolean; onOpen: () => void; onStop: () => void };
   attachments: Attachments;
   /** Sending with Gmail (E15-2): who it sends from, and whether it went out that way before. */
   gmail?: { sender: GmailSender; sentBefore: boolean };
@@ -64,9 +70,30 @@ export function EmailTab({
             I&apos;ll write a short email to go with your resume and cover letter, to whoever the posting says to send applications
             to. Copy it into your mail app or open it there, and attach the PDFs.
           </p>
-          <Button className="mt-1" aria-disabled={writing || undefined} onClick={() => !writing && onWrite()}>
-            {writing ? "Writing the email…" : "Write the email"}
-          </Button>
+          {claude ? (
+            <>
+              <p className="text-sm text-muted">
+                Dossier has no AI model of its own, so Claude writes it: <strong className="text-ink">Open in Claude Code</strong> continues the
+                session that wrote this application when it can, so Claude still has the posting and what it wrote, and saves the email here.
+              </p>
+              {claude.waiting ? (
+                <div role="status" className="flex flex-wrap items-center gap-x-4 gap-y-1 text-meta">
+                  <span className="text-muted">Waiting for Claude to save the email. Keep this page open; it fills in here.</span>
+                  <Button variant="text" className="underline underline-offset-[3px]" onClick={claude.onStop}>
+                    Stop waiting
+                  </Button>
+                </div>
+              ) : (
+                <Button className="mt-1" onClick={claude.onOpen}>
+                  Open in Claude Code
+                </Button>
+              )}
+            </>
+          ) : (
+            <Button className="mt-1" aria-disabled={writing || undefined} onClick={() => !writing && onWrite()}>
+              {writing ? "Writing the email…" : "Write the email"}
+            </Button>
+          )}
         </div>
       </div>
     );

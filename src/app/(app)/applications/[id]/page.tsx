@@ -2,9 +2,10 @@ import type { Metadata } from "next";
 import { cache } from "react";
 
 import { activityTimeline } from "@/lib/activity";
-import { isAiConfigured } from "@/lib/ai/config";
+import { isAiConfigured, isAiUsable } from "@/lib/ai/config";
 import { editsSchema, matchSchema, matchScore } from "@/lib/application-data";
 import { loadApplication, loadDocuments, readJson } from "@/lib/application-documents";
+import { handsOffToClaude } from "@/lib/connector/handoff";
 import { formatShortDate } from "@/lib/dates";
 import { resolveFileName } from "@/lib/file-name";
 import { refineJobKey } from "@/lib/jobs/refine";
@@ -40,10 +41,11 @@ export async function generateMetadata({ params }: PageProps<"/applications/[id]
 export default async function ApplicationPage({ params, searchParams }: PageProps<"/applications/[id]">) {
   const [{ id }, { tab }] = await Promise.all([params, searchParams]);
   await pullCalendar(id);
-  const [{ application, profile, settings, extracted, resume, letter, email, includeReferences, letterDate }, aiReady, unitJobs, refineJobs, emailJobs, timeZone, google, emails, themes] =
+  const [{ application, profile, settings, extracted, resume, letter, email, includeReferences, letterDate }, aiReady, writeInClaude, unitJobs, refineJobs, emailJobs, timeZone, google, emails, themes] =
     await Promise.all([
       loadDocuments(id),
       isAiConfigured(),
+      isAiUsable().then(handsOffToClaude),
       findUnfinishedJobs(unitJobKey(id)),
       findUnfinishedJobs(refineJobKey(id)),
       findUnfinishedJobs(emailJobKey(id)),
@@ -135,6 +137,7 @@ export default async function ApplicationPage({ params, searchParams }: PageProp
       score={match && match.items.length > 0 ? matchScore(match) : null}
       initialTab={tabFrom(tab)}
       aiReady={aiReady}
+      writeInClaude={writeInClaude}
       rewriting={rewriting}
       messages={messages}
       refining={refineJobs.at(-1)?.id ?? null}

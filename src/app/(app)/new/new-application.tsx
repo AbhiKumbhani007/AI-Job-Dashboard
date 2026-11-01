@@ -19,11 +19,12 @@ import { READ_POSTING_STEPS, WRITE_DOCUMENTS_STEPS } from "@/lib/jobs/applicatio
 import type { ReadPostingResult } from "@/lib/jobs/read-posting";
 import type { WriteDocumentsResult } from "@/lib/jobs/write-documents";
 
-import { openPendingTab, sendPendingTab } from "@/lib/claude-tab";
+import { openAppLink, openPendingTab, sendPendingTab } from "@/lib/claude-tab";
+import { copyText } from "@/lib/copy-text";
 
 import { addSkill } from "../profile/actions";
 
-import { createApplication, fetchPostingText, handOffToClaude, startReadingPosting, startWritingDocuments } from "./actions";
+import { checkClaudeDraft, createApplication, fetchPostingText, handOffToClaude, handOffToClaudeCode, startReadingPosting, startWritingDocuments } from "./actions";
 import { DetailsCard } from "./details-card";
 import { createDraftStore } from "./draft-store";
 import { MatchCard } from "./match-card";
@@ -31,6 +32,12 @@ import { TailoringCard } from "./tailoring-card";
 import { JobProgress, jobStep } from "./job-progress";
 
 const STEPS = ["Paste the posting", "Check the details", "Tailored documents"] as const;
+/** Where Claude writes it (#221): it reads the posting and writes the documents in one go, so there's no step of Dossier's own in between. */
+const CLAUDE_STEPS = ["Paste the posting", "Claude writes it", "Review the draft"] as const;
+
+/** While Claude writes it: how often to ask whether the draft is saved, and when to stop asking. */
+const CLAUDE_POLL_MS = 3000;
+const CLAUDE_WAIT_MS = 30 * 60_000;
 
 /** The editable details of "The application" (NEW-3). */
 export type Details = {
@@ -196,6 +203,33 @@ export function NewApplication({ aiReady, writeInClaude = false, samplePosting, 
   }, [fromPosting, initial, router]);
   const [starting, setStarting] = useState(false);
   const [fetching, setFetching] = useState(false);
+  // #221: after the posting is handed to Claude, the page asks every few seconds whether it saved the draft,
+  // then offers to open it: Claude's route has no "Check the details" and "Tailored documents" steps.
+  const [waiting, setWaiting] = useState<{ pasteId: string; applicationId: string | null } | null>(null);
+  const waitingFor = waiting && !waiting.applicationId ? waiting.pasteId : null;
+  useEffect(() => {
+    if (!waitingFor) return;
+    const started = Date.now();
+    let stopped = false;
+    const timer = setInterval(() => {
+      if (Date.now() - started > CLAUDE_WAIT_MS) {
+        clearInterval(timer);
+        setWaiting(null);
+        toast("Stopped waiting for Claude. If it saved the draft, it's under Applications.");
+        return;
+      }
+      void checkClaudeDraft({ pasteId: waitingFor }).then((result) => {
+        if (stopped || !result.ok || !result.data.applicationId) return;
+        clearInterval(timer);
+        setWaiting({ pasteId: waitingFor, applicationId: result.data.applicationId });
+        toast("Claude saved the draft.");
+      });
+    }, CLAUDE_POLL_MS);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [waitingFor]);
   const [readRevision, setReadRevision] = useState(0);
 
   // E11-3: a new step replaces the controls of the last one, so focus moves to
@@ -245,7 +279,26 @@ export function NewApplication({ aiReady, writeInClaude = false, samplePosting, 
     setStarting(false);
     if (!result.ok) return void chat?.close();
     sendPendingTab(chat, result.data.url);
-    toast("Writing it in Claude. It shows up under Applications as a Draft once Claude has saved it.");
+    setWaiting({ pasteId: result.data.pasteId, applicationId: null });
+    toast("Writing it in Claude. This page offers to open the draft once Claude has saved it.");
+  };
+
+  // The same hand-off for Claude Code in Terminal: the prompt goes to the clipboard, and the link starts the
+  // DossierClaude helper app on this Mac (scripts/macos), which opens Terminal with `claude` and the prompt.
+  const writeWithClaudeCode = async () => {
+    if (!draft.posting.trim()) return toast("Paste a job posting first.");
+    setStarting(true);
+    const result = toastResult(await handOffToClaudeCode({ posting: draft.posting, postingUrl: draft.postingUrl }));
+    setStarting(false);
+    if (!result.ok) return;
+    const copied = await copyText(result.data.prompt);
+    openAppLink(result.data.link);
+    setWaiting({ pasteId: result.data.pasteId, applicationId: null });
+    toast(
+      copied
+        ? "Opening Claude Code in Terminal. The prompt is on your clipboard too, in case nothing opens."
+        : "Opening Claude Code in Terminal. If nothing opens, the launcher isn't installed.",
+    );
   };
 
   // E7-8: the posting's text from its link, to check before reading it.
@@ -347,8 +400,8 @@ export function NewApplication({ aiReady, writeInClaude = false, samplePosting, 
       />
       <div className="flex max-w-[816px] flex-col gap-6 px-10 pb-20">
         <Stepper
-          steps={STEPS}
-          current={draft.step === "creating" ? 2 : draft.step === "review" ? 1 : 0}
+          steps={writeInClaude ? CLAUDE_STEPS : STEPS}
+          current={writeInClaude ? (waiting?.applicationId ? 2 : waiting ? 1 : 0) : draft.step === "creating" ? 2 : draft.step === "review" ? 1 : 0}
           aria-label="New application steps"
         />
 
@@ -358,8 +411,9 @@ export function NewApplication({ aiReady, writeInClaude = false, samplePosting, 
               {writeInClaude ? (
                 <p role="note" className="rounded-card border border-line-card bg-card px-4 py-3 text-meta text-muted">
                   Dossier has no AI model of its own, so Claude writes this one: <strong className="text-ink">Write it with Claude</strong> opens a
-                  chat in Claude that uses your Claude plan and the Dossier connector, and saves the resume and cover letter here as a Draft. To
-                  have Dossier write it instead,{" "}
+                  chat in Claude that uses your Claude plan and the Dossier connector, and saves the resume and cover letter here as a Draft;{" "}
+                  <strong className="text-ink">Open in Claude Code</strong> does the same in Terminal, on a Mac with the DossierClaude launcher
+                  (<code className="font-mono text-label">scripts/macos/install-claude-launcher.sh</code>). To have Dossier write it instead,{" "}
                   <Link href="/settings?section=ai" className="font-medium text-ink underline underline-offset-2">
                     choose a model in Settings → AI provider
                   </Link>
@@ -410,6 +464,30 @@ export function NewApplication({ aiReady, writeInClaude = false, samplePosting, 
                   </p>
                 </div>
               </Card>
+              {waiting && (
+                <div role="status" className="flex flex-wrap items-center justify-between gap-3 rounded-card border border-line-card bg-card px-4 py-3 text-meta">
+                  {waiting.applicationId ? (
+                    <>
+                      <span className="text-ink">Claude saved the draft. Check the details and the documents on its page.</span>
+                      <Button
+                        onClick={() => {
+                          draftStore?.clear();
+                          router.push(`/applications/${waiting.applicationId}`);
+                        }}
+                      >
+                        Open the application →
+                      </Button>
+                    </>
+                  ) : (
+                    <>
+                      <span className="text-muted">Waiting for Claude to save the draft. Keep this page open; it offers to open it here.</span>
+                      <Button variant="text" className="underline underline-offset-[3px]" onClick={() => setWaiting(null)}>
+                        Stop waiting
+                      </Button>
+                    </>
+                  )}
+                </div>
+              )}
               <div className="flex flex-wrap items-center justify-between gap-3">
                 {samplePosting ? (
                   <Button variant="text" className="underline underline-offset-[3px]" onClick={() => update({ posting: samplePosting })}>
@@ -418,12 +496,23 @@ export function NewApplication({ aiReady, writeInClaude = false, samplePosting, 
                 ) : (
                   <span />
                 )}
-                <Button
-                  aria-disabled={!draft.posting.trim() || starting || undefined}
-                  onClick={() => void (starting ? undefined : writeInClaude ? writeWithClaude() : read())}
-                >
-                  {writeInClaude ? "Write it with Claude →" : "Read the posting →"}
-                </Button>
+                <div className="flex flex-wrap items-center gap-3">
+                  {writeInClaude && (
+                    <Button
+                      variant="secondary"
+                      aria-disabled={!draft.posting.trim() || starting || undefined}
+                      onClick={() => void (starting ? undefined : writeWithClaudeCode())}
+                    >
+                      Open in Claude Code
+                    </Button>
+                  )}
+                  <Button
+                    aria-disabled={!draft.posting.trim() || starting || undefined}
+                    onClick={() => void (starting ? undefined : writeInClaude ? writeWithClaude() : read())}
+                  >
+                    {writeInClaude ? "Write it with Claude →" : "Read the posting →"}
+                  </Button>
+                </div>
               </div>
             </>
           )}

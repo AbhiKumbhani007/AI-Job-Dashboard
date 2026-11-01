@@ -26,7 +26,9 @@ import { applyStatusChange } from "@/lib/status-changes";
 import { appVersion } from "@/lib/version";
 
 import { connectorDraftJob } from "./draft";
-import { readPastedPosting } from "./handoff";
+import { saveWrittenEmail, writtenEmailSchema } from "./email-write";
+import { linkPastedPosting, readPastedPosting } from "./handoff";
+import { readProfileSchema, readResumeSchema, saveReadProfile } from "./profile-write";
 import { saveWrittenApplication, WRITTEN_IN_CLAUDE, writtenDetailsSchema, writtenLetterSchema, writtenMatchSchema, writtenResumeSchema } from "./write";
 
 // The Claude connector's tools (#221, src/app/api/mcp), adapted from Anirudh
@@ -131,11 +133,14 @@ export function createDossierServer(origin: string): McpServer {
     {
       instructions:
         "Dossier is the user's own job search app: one profile, tailored resumes and cover letters, and every application tracked. " +
+        "If the profile is empty, read the user's resume yourself and fill it in with import_profile. " +
         "Search jobs with search_jobs (in the profile's city and country unless the user says otherwise), " +
         "and when the user wants to know which fit best, score them against the profile and save the scores with save_job_scores. " +
         "To draft an application, you write it yourself: call get_profile and get_posting, write a tailored resume and cover letter " +
         "from facts in the profile only (never invent experience, employers, numbers or degrees; say what's missing instead), " +
-        "show the user a short summary, then save it with save_application. Read or update applications with the other tools. " +
+        "show the user a short summary, then save it with save_application. The email to send an application with is written the same way: " +
+        "read it with get_application and the profile with get_profile, write it from facts in the profile and the posting only, then save it with save_email. " +
+        "Read or update applications with the other tools. " +
         "Nothing is ever sent for the user: drafts wait in Dossier for them to review and download as PDFs.",
     },
   );
@@ -149,6 +154,36 @@ export function createDossierServer(origin: string): McpServer {
       annotations: { readOnlyHint: true },
     },
     async () => text({ ...JSON.parse(profileForPrompt(await loadProfile())), link: linkTo("/profile") }),
+  );
+
+  server.registerTool(
+    "import_profile",
+    {
+      title: "Fill the profile from the user's resume",
+      description:
+        "Saves a profile you read from the user's resume into Dossier's profile, as Dossier's own resume import would, so no AI model of Dossier's own is needed. " +
+        "Read the whole resume, pass its text as resume_text and what you read as profile. Take everything only from the resume: never add, guess or improve facts; use null, an empty string or an empty list for what it doesn't say. " +
+        "Merge only: what the resume says wins over the profile's basics and over a role (same role and company), project, degree or reference already there; everything else is added and nothing is deleted. " +
+        "Call get_profile first when the profile may already hold something. Names Dossier can't find in resume_text come back as check_these: tell the user to check them.",
+      inputSchema: z.object({
+        resume_text: readResumeSchema.describe("The resume's text, whole and unchanged, which every name in profile is looked up in"),
+        profile: readProfileSchema.describe(
+          "basics (dob as YYYY-MM-DD, only when the resume gives the full date); skills, each short and once; languages with NATIVE or a CEFR level C2–A1, null when none is given; " +
+            "experience and projects most recent first, with four-digit years, months 1–12 (null when only a year is given), current true while a role goes on, bullets as one string per bullet without the bullet mark; " +
+            "education, publications (the citation word for word) and references (only people the resume names as references)",
+        ),
+      }),
+      annotations: { readOnlyHint: false, idempotentHint: true },
+    },
+    async ({ resume_text, profile }) => {
+      const saved = await saveReadProfile({ resume: resume_text, profile });
+      return text({
+        saved: saved.counts,
+        link: linkTo("/profile"),
+        check_these: saved.unverified.length > 0 ? saved.unverified : undefined,
+        next: saved.unverified.length > 0 ? "Dossier couldn't find these names in the resume's text; tell the user to check them on the Profile screen." : "Tell the user the profile is filled in and to look it over on the Profile screen.",
+      });
+    },
   );
 
   server.registerTool(
@@ -402,12 +437,43 @@ export function createDossierServer(origin: string): McpServer {
         match,
         note: note ?? "",
       });
+      // New application is waiting for it, if the posting was pasted there.
+      if (source.paste_id) await linkPastedPosting(source.paste_id, saved.applicationId);
       return text({
         application_id: saved.applicationId,
         status: "Draft",
         link: linkTo(`/applications/${saved.applicationId}`),
         check_these: saved.unverified.length > 0 ? saved.unverified : undefined,
         next: saved.unverified.length > 0 ? "Dossier marked names or numbers it couldn't find in the profile or posting; tell the user to check them." : undefined,
+      });
+    },
+  );
+
+  server.registerTool(
+    "save_email",
+    {
+      title: "Save the email to send an application with",
+      description:
+        "Saves the short email that goes with an application, to whoever the posting says to send it to, on the application's Email tab, where the user can edit it, copy it or open it in their mail app. " +
+        "The resume and cover letter are attached to it, so it doesn't repeat them. Read the application with get_application (its posting, details and documents) and the profile with get_profile. " +
+        "Use only facts from the profile and the posting. The recipient is only an address the posting contains; never guess one. Writing it again replaces the email, keeping a recipient the user typed in. Nothing is sent.",
+      inputSchema: z.object({ application_id: z.string().min(1).max(100).describe("The application's id from save_application or list_applications"), ...writtenEmailSchema.shape }),
+      annotations: { readOnlyHint: false, idempotentHint: true },
+    },
+    async ({ application_id, ...email }) => {
+      const saved = await saveWrittenEmail(application_id, email);
+      if (!saved) return failure("That application no longer exists.");
+      return text({
+        application_id,
+        to: saved.to || undefined,
+        link: linkTo(`/applications/${application_id}?tab=email`),
+        check_these: saved.unverified.length > 0 ? saved.unverified : undefined,
+        next:
+          saved.unverified.length > 0
+            ? "Dossier marked names or numbers it couldn't find in the profile or posting; tell the user to check them."
+            : saved.to
+              ? "Tell the user the email is ready on the application's Email tab."
+              : "The posting gives no address to send it to; tell the user to add one on the Email tab.",
       });
     },
   );

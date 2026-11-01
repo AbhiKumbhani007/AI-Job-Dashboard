@@ -21,6 +21,8 @@ import {
 } from "@/generated/prisma/enums";
 import { type Match, type Requirement, type Unit } from "@/lib/application-data";
 import { EMAIL_UNITS, WRITTEN_EMAIL_UNITS } from "@/lib/application-email";
+import { openAppLink } from "@/lib/claude-tab";
+import { copyText } from "@/lib/copy-text";
 import { documentLabels } from "@/lib/document-labels";
 import { defaultFrame, isFrameUnit, isParagraph, withFrame, WRITTEN_FRAME_UNITS } from "@/lib/letter-frame";
 import type { ActivityEntry } from "@/lib/activity";
@@ -47,6 +49,7 @@ import {
   setFollowThemeLayout,
   setShowPhoto,
   startRegenerating,
+  handOffEmailToClaudeCode,
   startWritingEmail,
   undoEmailRewrite,
   undoMessage,
@@ -93,6 +96,10 @@ type Target = { document: DocumentKind; unitId: string; label: string; name: str
 const NO_MESSAGES: ChatEntry[] = [];
 
 const NO_AI = "That needs an AI provider. Choose one in Settings → AI provider.";
+
+/** While Claude Code writes the email: how often the page asks again, and when it stops asking. */
+const CLAUDE_POLL_MS = 3000;
+const CLAUDE_WAIT_MS = 30 * 60_000;
 
 const NOTHING_SAVING: Readonly<Record<string, string>> = {};
 
@@ -152,6 +159,8 @@ export type ApplicationViewProps = {
   initialTab: Tab;
   /** Whether an AI provider is set up; without one, the AI buttons point to Settings. */
   aiReady: boolean;
+  /** Claude writes what Dossier has no AI model for, through the connector (#221): the Email tab offers Claude Code. */
+  writeInClaude?: boolean;
   /** Units being rewritten in the background (E8-4), e.g. since before a reload. */
   rewriting: { jobId: string; document: DocumentKind; unitId: string }[];
   /** The Refine with AI conversation (E8-5), oldest first. */
@@ -191,6 +200,7 @@ export function ApplicationView({
   score,
   initialTab,
   aiReady,
+  writeInClaude = false,
   rewriting: rewritingAtLoad,
   messages,
   refining,
@@ -280,6 +290,39 @@ export function ApplicationView({
       flashing.start([key]);
     });
   };
+
+  // #221: Claude Code writes the email on the user's own Claude plan and saves it through the connector; the
+  // page asks for the application again every few seconds, until the email is there.
+  const [emailInClaude, setEmailInClaude] = useState(false);
+  const openEmailInClaudeCode = async () => {
+    const result = await handOffEmailToClaudeCode({ id: application.id });
+    if (!result.ok) return void toast(result.error);
+    const copied = await copyText(result.data.prompt);
+    openAppLink(result.data.link);
+    setEmailInClaude(true);
+    toast(
+      copied
+        ? "Opening Claude Code in Terminal. The prompt is on your clipboard too, in case nothing opens."
+        : "Opening Claude Code in Terminal. If nothing opens, the launcher isn't installed.",
+    );
+  };
+  const waitingForClaudeEmail = emailInClaude && !email;
+  useEffect(() => {
+    if (!waitingForClaudeEmail) return;
+    const started = Date.now();
+    const timer = setInterval(() => {
+      if (Date.now() - started > CLAUDE_WAIT_MS) {
+        clearInterval(timer);
+        setEmailInClaude(false);
+        return;
+      }
+      router.refresh();
+    }, CLAUDE_POLL_MS);
+    return () => clearInterval(timer);
+  }, [waitingForClaudeEmail, router]);
+  useEffect(() => {
+    if (emailInClaude && email) toast("Claude saved the email.");
+  }, [emailInClaude, email]);
 
   const needsAi = () => {
     toast(NO_AI, { action: { label: "Open Settings", onClick: () => router.push("/settings?section=ai") } });
@@ -736,6 +779,7 @@ export function ApplicationView({
             notice={viewed(DocumentKind.EMAIL) ? versionBanner(viewed(DocumentKind.EMAIL)!) : undefined}
             writing={emailJob !== null}
             onWrite={() => void writeEmail()}
+            claude={writeInClaude ? { waiting: waitingForClaudeEmail, onOpen: () => void openEmailInClaudeCode(), onStop: () => setEmailInClaude(false) } : undefined}
             attachments={attachments}
             gmail={gmail && { sender: gmail.sender, sentBefore: gmail.sentBefore }}
           />

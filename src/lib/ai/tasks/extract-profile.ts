@@ -18,7 +18,7 @@ const dates = {
   endMonth: z.number().int().nullable(),
   current: z.boolean(),
 };
-const answerSchema = z.object({
+export const answerSchema = z.object({
   basics: z.object({
     name: text,
     headline: text,

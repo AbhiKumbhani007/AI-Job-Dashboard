@@ -6,7 +6,7 @@ import { createTestClient, resetDatabase } from "@/test/db";
 import { seedBuiltIns } from "../../../prisma/seed/built-ins";
 import { seedDemo } from "../../../prisma/seed/demo";
 
-import { handOffPastedPosting } from "./handoff";
+import { applicationFromPaste, handOffPastedPosting } from "./handoff";
 import { challengeOf, exchangeCode, issueCode, registerClient } from "./oauth";
 
 // The Claude connector's tools (#221), called as Claude calls them, through
@@ -136,7 +136,7 @@ describe("the Claude connector's tools (#221)", () => {
     expect((await tool("get_posting", { posting_id: row.id })).json).toMatchObject({ title: "UX Writer", text: expect.stringContaining("The whole posting from its source") });
     expect(await tool("get_posting", { posting_id: "gone" })).toMatchObject({ isError: true, text: "That posting is no longer in Dossier. Open it again from Find jobs." });
 
-    const chat = await handOffPastedPosting({ text: "Pasted: Senior Designer at Acme", url: "https://jobs.example/pasted" });
+    const { url: chat } = await handOffPastedPosting({ text: "Pasted: Senior Designer at Acme", url: "https://jobs.example/pasted" });
     const pasteId = /paste_id "([^"]+)"/.exec(new URL(chat).searchParams.get("q")!)![1];
     expect((await tool("get_posting", { paste_id: pasteId })).json).toMatchObject({ text: "Pasted: Senior Designer at Acme", url: "https://jobs.example/pasted" });
     expect(await tool("get_posting", { paste_id: "00000000-0000-0000-0000-000000000000" })).toMatchObject({ isError: true });
@@ -163,9 +163,66 @@ describe("the Claude connector's tools (#221)", () => {
     expect(await prisma().application.findUniqueOrThrow({ where: { id } })).toMatchObject({ company: "Acme", status: "DRAFT", postingUrl: "https://jobs.example/p1" });
     expect((await prisma().posting.findFirstOrThrow({ where: { externalId: "p1" } })).applicationId).toBe(id);
 
+    // From a pasted posting, New application is waiting for it: the paste remembers the application.
+    const { pasteId } = await handOffPastedPosting({ text: "Pasted: Product Designer at Acme", url: "" });
+    expect(await applicationFromPaste(pasteId)).toBeNull();
+    const fromPaste = await tool("save_application", {
+      paste_id: pasteId,
+      details: { company: "Acme", role: "Product Designer" },
+      resume: { summary: "Designer who ships calm products.", roles: [{ id: profile.id, bullets: ["Led the payments redesign"] }], skills: ["Figma"] },
+      cover_letter: { paragraphs: [{ text: "I'd like to help Acme." }] },
+      match: [{ requirement: "Figma", result: "covered" }],
+    });
+    expect(await applicationFromPaste(pasteId)).toBe(fromPaste.json.application_id);
+
     expect(await tool("save_application", { details: { company: "Acme", role: "Designer" }, resume: { summary: "", roles: [], skills: [] }, cover_letter: { paragraphs: [{ text: "Hi" }] } })).toMatchObject({
       isError: true,
     });
+  });
+
+  it("saves the email Claude wrote on the application's Email tab, with only an address the posting has (#221)", async () => {
+    const ledgerly = await prisma().application.findFirstOrThrow({ where: { company: "Ledgerly" } });
+    await prisma().application.update({ where: { id: ledgerly.id }, data: { postingText: "Ledgerly is hiring a Product Designer. Send applications to Jane Roe at jobs@ledgerly.example." } });
+    const email = (extra: Record<string, unknown> = {}) => ({
+      application_id: ledgerly.id,
+      contact_name: "Jane Roe",
+      contact_email: "jobs@ledgerly.example",
+      subject: "Application: Product Designer, Jane Doe",
+      greeting: "Dear Jane,",
+      paragraphs: ["I'd love to bring calm to Ledgerly's payments.", "My resume and cover letter are attached."],
+      ...extra,
+    });
+    const emailOf = async (id: string) => {
+      const document = await prisma().document.findFirstOrThrow({ where: { applicationId: id, kind: "EMAIL" } });
+      return Object.fromEntries((document.units as { id: string; text: string }[]).map((unit) => [unit.id, unit.text]));
+    };
+
+    const saved = await tool("save_email", email());
+    expect(saved.json).toMatchObject({ application_id: ledgerly.id, to: "Jane Roe <jobs@ledgerly.example>", link: `https://dossier.example/applications/${ledgerly.id}?tab=email` });
+    const parts = await emailOf(ledgerly.id);
+    expect(parts).toMatchObject({ to: "Jane Roe <jobs@ledgerly.example>", subject: "Application: Product Designer, Jane Doe" });
+    // The greeting, the paragraphs, then the sign-off and the candidate's name.
+    expect(parts.body).toMatch(/^Dear Jane,\n\nI'd love to bring calm to Ledgerly's payments\.\n\nMy resume and cover letter are attached\.\n\n[^\n]+\nJane Doe$/);
+
+    // Writing it again replaces it, and keeps the recipient the posting gave or the user typed in.
+    await tool("save_email", email({ subject: "Application: Product Designer", contact_email: null }));
+    expect(await prisma().document.count({ where: { applicationId: ledgerly.id, kind: "EMAIL" } })).toBe(1);
+    expect(await emailOf(ledgerly.id)).toMatchObject({ to: "Jane Roe <jobs@ledgerly.example>", subject: "Application: Product Designer" });
+
+    // An address the posting doesn't contain is never used.
+    const other = await prisma().application.findFirstOrThrow({ where: { company: { not: "Ledgerly" } } });
+    const guessed = await tool("save_email", email({ application_id: other.id, contact_email: "made.up@nowhere.example" }));
+    expect(guessed.json.to).toBeUndefined();
+    expect(guessed.json.next).toContain("add one");
+    expect((await emailOf(other.id)).to).toBe("");
+
+    // With "Never invent experience" on, a figure that isn't in the profile or posting is marked.
+    await saveSettings({ strict: true });
+    const invented = await tool("save_email", email({ paragraphs: ["I grew revenue 340% at Initech."] }));
+    expect(invented.json.check_these).toEqual(expect.arrayContaining([expect.any(String)]));
+
+    expect(await tool("save_email", email({ application_id: "gone" }))).toMatchObject({ isError: true, text: "That application no longer exists." });
+    expect(await tool("save_email", email({ paragraphs: [] }))).toMatchObject({ isError: true });
   });
 
   it("has Dossier's own model draft one only when there is one, and says how it's coming along", async () => {
@@ -195,5 +252,46 @@ describe("the Claude connector's tools (#221)", () => {
       link: "https://dossier.example/jobs?view=saved",
     });
     expect(await tool("save_job_scores", { search_id: "gone", scores: [{ number: 1, score: 1, reasons: ["?"] }] })).toMatchObject({ isError: true });
+  });
+
+  it("fills the profile from a resume Claude read: merged, nothing deleted, names looked up in the resume", async () => {
+    const resume = "Alex Example\nPrincipal Designer, Zenith Labs, 2020 to present\n- Built the Orbit design system\nSkills: Figma, Prototyping\nEnglish (native)";
+    const read = (bullets: string[]) => ({
+      basics: { name: "Alex Example", headline: null, email: null, phone: null, dob: null, website: null, address: null, city: null, country: null, linkedin: null, summary: null },
+      skills: ["Figma", "Prototyping", "Rust"],
+      languages: [{ name: "English", level: "NATIVE" }],
+      experience: [
+        { role: "Principal Designer", company: "Zenith Labs", location: null, descriptor: null, startYear: 2020, startMonth: null, endYear: null, endMonth: null, current: true, bullets, skills: ["Figma"] },
+      ],
+      projects: [],
+      education: [],
+      publications: [],
+      references: [],
+    });
+    const roles = await prisma().experience.count();
+    const email = await prisma().profileField.findUniqueOrThrow({ where: { key: "email" } });
+
+    const saved = await tool("import_profile", { resume_text: resume, profile: read(["- Built the Orbit design system"]) });
+    expect(saved.json).toMatchObject({ saved: expect.stringContaining("1 role"), link: "https://dossier.example/profile", check_these: ["Rust"] });
+    expect(await prisma().experience.count()).toBe(roles + 1);
+    expect(await prisma().experience.findFirstOrThrow({ where: { company: "Zenith Labs" } })).toMatchObject({
+      role: "Principal Designer",
+      current: true,
+      startYear: 2020,
+      bullets: "Built the Orbit design system",
+    });
+    expect(await prisma().profileField.findUniqueOrThrow({ where: { key: "name" } })).toMatchObject({ value: "Alex Example" });
+    // What the resume leaves out stays.
+    expect(await prisma().profileField.findUniqueOrThrow({ where: { key: "email" } })).toMatchObject({ value: email.value });
+    expect(await prisma().skill.findUnique({ where: { name: "Rust" } })).not.toBeNull();
+
+    // Saving again updates the same role instead of adding a second.
+    const again = await tool("import_profile", { resume_text: resume, profile: read(["Built the Orbit design system", "Led a team of five"]) });
+    expect(again.isError).toBe(false);
+    expect(await prisma().experience.count()).toBe(roles + 1);
+    expect((await prisma().experience.findFirstOrThrow({ where: { company: "Zenith Labs" } })).bullets).toBe("Built the Orbit design system\nLed a team of five");
+
+    expect(await tool("import_profile", { profile: read([]) })).toMatchObject({ isError: true });
+    expect(await tool("import_profile", { resume_text: "", profile: read([]) })).toMatchObject({ isError: true });
   });
 });

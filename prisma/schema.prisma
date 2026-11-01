@@ -442,6 +442,8 @@ model Application {
   interviewCalendarId String?
   /// The Find jobs posting it was started from, if any (E14-8).
   posting             Posting?
+  /// The pasted postings Claude saved this application from (save_application), so New application can open it.
+  claudePastes        ClaudePaste[]
   /// The agent candidate it was prepared from (E16).
   agentCandidate      AgentCandidate?
   /// The startup it was started from on Startups, if any (#222).
@@ -628,14 +630,18 @@ model Posting {
 /// the Claude connector reads it by its id. It's kept for 14 days, then the
 /// task-data sweep deletes it.
 model ClaudePaste {
-  id        String   @id @default(uuid())
-  text      String
+  id            String       @id @default(uuid())
+  text          String
   /// The posting's link, when one was given; always http(s), or empty.
-  url       String   @default("")
-  expiresAt DateTime
-  createdAt DateTime @default(now())
+  url           String       @default("")
+  expiresAt     DateTime
+  createdAt     DateTime     @default(now())
+  /// The application Claude saved from this posting (save_application), once it has.
+  applicationId String?
+  application   Application? @relation(fields: [applicationId], references: [id], onDelete: SetNull)
 
   @@index([expiresAt])
+  @@index([applicationId])
 }
 
 // ─── Job agent (E16) ─────────────────────────────────────────────────────────

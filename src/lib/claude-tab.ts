@@ -16,3 +16,8 @@ export function sendPendingTab(tab: Window | null, url: string): void {
     window.open(url, "_blank", "noopener");
   }
 }
+
+/** Opens a link another app on this computer handles, such as a dossier-claude:// one; the page stays where it is. */
+export function openAppLink(url: string): void {
+  window.location.assign(url);
+}
