@@ -23,6 +23,8 @@ It's for one person on a small server: one password, your data in your own Postg
 
 **Get started:** [run it on your computer](#run-it-on-your-computer) in a few minutes, or [self-host it](#self-hosting) on a server. The [installation guide](https://github.com/AienTech/dossier/wiki) covers every way: Docker with or without Compose, Node.js, a plain Ubuntu server, CapRover, Coolify and Dokploy.
 
+> **About this repository:** a fork of [AienTech/dossier](https://github.com/AienTech/dossier) that lets [Claude Code](#use-it-with-claude-code-no-ai-key-needed) do the AI work on your own Claude plan, so Dossier needs no AI model or API key of its own. Everything else is Dossier as it is upstream, under the same [AGPL-3.0 license](LICENSE).
+
 ## Demo
 
 ![Dossier in use: the dashboard, dragging a card on the board, a new application from a pasted posting, refining the tailored resume in the chat, the cover letter, and switching resume themes](.github/images/demo.gif)
@@ -40,7 +42,7 @@ It's for one person on a small server: one password, your data in your own Postg
 - **Never invents experience:** drafts only use facts from your profile. What the posting asks for and your profile doesn't have is shown as a gap, not made up.
 - **Refine:** ask for changes in a chat, edit or regenerate any part (every part of the cover letter too: sender, date, recipient, greeting and sign-off, written in the letter's language), undo AI changes or go back to any earlier version, keep private notes.
 - **Send:** an email to go with each application, to whoever the posting says to send it to, ready to copy or open in your mail app, with the resume and cover letter PDFs to attach. Edit, rewrite or refine it like the documents.
-- **MCP connector (optional):** use Dossier from Claude, on claude.ai, in the Desktop and mobile apps or in Claude's command-line app, on your own Claude plan, or from another MCP app such as n8n. Claude can search for jobs, score them against your profile, read your profile and applications, and save the resume and cover letter it writes as a Draft, checked like Dossier's own. It never sends or deletes anything. Without an AI model of Dossier's own, **Write it with Claude** hands a posting to a new Claude chat. Turn it on in Settings → MCP connector (see [Connecting Claude](https://github.com/AienTech/dossier/wiki/Connecting-Claude)).
+- **MCP connector (optional):** use Dossier from Claude, on claude.ai, in the Desktop and mobile apps or in Claude's command-line app, on your own Claude plan, or from another MCP app such as n8n. Claude can search for jobs, score them against your profile, read your profile and applications, and save the resume and cover letter it writes as a Draft, checked like Dossier's own. It can also fill your profile from your resume and write the email that goes with an application. It never sends or deletes anything. Without an AI model of Dossier's own, **Write it with Claude** hands a posting to a new Claude chat, and **Open in Claude Code** hands it to Claude Code in your terminal (see [Use it with Claude Code](#use-it-with-claude-code-no-ai-key-needed)). Turn it on in Settings → MCP connector (see [Connecting Claude](https://github.com/AienTech/dossier/wiki/Connecting-Claude)).
 - **Gmail and Calendar (optional):** connect your Google account to send an application from your own address with its PDFs attached, see employers' replies next to each application, have the AI read what they ask and draft your answer from your profile, offer interview times you're free, and see your month and the week ahead on the dashboard, with interviews kept in step with Google Calendar both ways. Nothing is sent without your confirmation. Set it up by entering your Google OAuth client in Settings → Google, or with `DOSSIER_GOOGLE_CLIENT_ID` and `DOSSIER_GOOGLE_CLIENT_SECRET` (see [Connecting Gmail and Calendar](https://github.com/AienTech/dossier/wiki/Connecting-Gmail-and-Calendar)).
 - **Track:** a board and a table of every application, and a dashboard with your funnel (last 30 days, 90 days or all time), a week-by-week chart, what's worth a look next, upcoming interviews included, and a calendar.
 - **Your data:** export and import everything as one file, nightly backups, and Delete everything.
@@ -103,6 +105,77 @@ The first start downloads the image (about 1.7 GB) and sets up the database. Ope
 
 `docker compose stop` stops it and `docker compose start` starts it again, with your data kept. It's only reachable from your own computer. The [installation guide's Docker Compose page](https://github.com/AienTech/dossier/wiki/Run-locally-with-Docker-Compose) has more: another port, your time zone, upgrades and removing it.
 
+## Use it with Claude Code (no AI key needed)
+
+Dossier normally needs an AI model to read postings and write documents. Without one, Claude Code, running on your own Claude plan, does that work through the [MCP connector](https://github.com/AienTech/dossier/wiki/Connecting-Claude): Claude reads your profile and the posting, writes the resume, cover letter and email, and saves them into Dossier as a Draft. You review and edit them in Dossier, download the PDFs and track the application. Nothing is sent for you.
+
+What this fork adds to the connector:
+
+- **`import_profile`:** Claude reads your resume file and fills your profile (merge only: nothing is deleted).
+- **`save_email`:** Claude writes the email that goes with an application and saves it on the Email tab. The recipient is only an address the posting contains.
+- **Open in Claude Code** on New application and on the Email tab: the posting or application is saved for Claude to read, the prompt is copied to your clipboard, and (on a Mac with the launcher below) Terminal opens with Claude Code already running it.
+- **The same session:** the email continues the Claude Code session that wrote the resume and cover letter, so Claude still has the posting, your profile and what it wrote.
+- **A waiting banner:** after the hand-off, New application and the Email tab watch for what Claude saves and offer to open it. With Claude, New application's steps are Paste the posting, Claude writes it, Review the draft.
+
+### Set it up
+
+1. **Run Dossier** by following Getting started in [DEVELOPMENT.md](DEVELOPMENT.md): copy `.env.example` to `.env`, hash a password, set `DOSSIER_SECRET`, and `docker compose up`. If port 5432 is already used by a local PostgreSQL, set `POSTGRES_PORT=5433` in `.env`. If you only have the standalone `docker-compose` (no `docker compose` plugin), use that command instead. You don't need to choose a model in Settings → AI provider.
+2. **Choose a job source** in Settings → Job search. FreeHire needs no key; JSearch and Adzuna need a free one. Searching is off until you choose.
+3. **Turn the connector on** in Settings → MCP connector.
+4. **Add it to Claude Code** from the folder you'll run Claude Code in (the repository folder, if you use the launcher below). Claude Code keeps this per folder:
+
+   ```bash
+   claude mcp add --transport http dossier http://localhost:3000/api/mcp
+   ```
+
+   Then start `claude`, run `/mcp`, choose `dossier` and sign in: it opens Dossier in your browser to allow Claude. If you turn the connector off or change `DOSSIER_PASSWORD` or `DOSSIER_SECRET`, sign in again.
+5. **Fill your profile** by telling Claude Code: *Read my resume at `<path to your resume>` and fill my Dossier profile with the import_profile tool.* Then check the Profile screen: it saved straight away, without the preview Dossier's own import shows.
+
+### Use it
+
+In Claude Code (or from the buttons below), for example:
+
+- *Search Dossier for `<role>` jobs in `<city>` from the last week, then score the top 10 against my profile.*
+- *Write a tailored resume and cover letter for #3 and save it as a draft.*
+- *Write the email for application `<id>` and save it.*
+
+Or paste a posting into **New application** and click **Open in Claude Code** (or **Write it with Claude** for a chat on claude.ai). The page shows when Claude has saved the draft, and its Open the application button goes to the application: its details, match, resume and cover letter are all there to check and edit by hand. Claude saves a new application each time it writes one, so to change a document, edit it in Dossier or ask Claude to write it again and delete the old draft.
+
+### One-click launch from the browser (macOS)
+
+The **Open in Claude Code** buttons open a `dossier-claude://` link. A small helper app on your Mac handles it: it opens Terminal in this repository's folder and starts `claude` with the prompt. Without the helper, the buttons still copy the prompt: open a terminal in the repository folder, run `claude` and paste it. That is also how to use it on Linux or Windows.
+
+**What you need:** macOS, the Terminal app, Claude Code installed (`claude` on your path, or in `~/.local/bin`), and Dossier running.
+
+**Install it once**, from the repository folder:
+
+```bash
+scripts/macos/install-claude-launcher.sh
+```
+
+This builds `~/Applications/DossierClaude.app` and registers the `dossier-claude://` links with macOS. Run it again if you move the repository or change `scripts/macos/DossierClaude.applescript`. To remove it: `scripts/macos/install-claude-launcher.sh --uninstall`.
+
+**The first time you use it, you'll be asked three things, once each:**
+
+1. **Your browser** asks whether `dossier-claude` links may open DossierClaude. Allow it, and tick "always allow".
+2. **macOS** asks whether DossierClaude may control Terminal. Choose OK. You can change it later in System Settings → Privacy & Security → Automation.
+3. **Claude Code** asks whether to trust the folder, and to approve each Dossier tool the first time it's used.
+
+Each click opens a new Terminal window. The link only says what to do and which posting or application; the helper writes the prompt itself, so a web page can't start Claude Code with a prompt of its own.
+
+**If something doesn't work:**
+
+| What you see | What to check |
+|---|---|
+| Nothing opens | The launcher isn't installed (`ls ~/Applications/DossierClaude.app`), or the browser blocked the link: allow it in the site's settings and click again. The prompt is on your clipboard either way. |
+| Claude says it has no Dossier tools | Run `claude mcp get dossier` in the folder Terminal opened. If it isn't listed, add the connector there (step 4 above), then `/mcp`. |
+| `/api/mcp` answers 404 | The connector is off: turn it on in Settings → MCP connector. |
+| A tool the app has isn't there after an update | Claude Code reads the tool list when it connects: run `/mcp` and reconnect, or start a new `claude`. |
+| The email starts a new session instead of continuing | Only applications written from Open in Claude Code after this feature can continue their session. Earlier ones start a fresh session, which works too. |
+| The page keeps reloading while you edit code | Close extra Dossier tabs, restart with `docker compose restart app` and reload the tabs. After a change to `prisma/schema.prisma`, also run `yarn prisma migrate deploy` and `yarn prisma generate` in the container. |
+
+**Good to know:** what you paste and your profile go to Anthropic through Claude Code, on your own Claude plan. Dossier's own AI buttons (the refine chat, Regenerate, the Score button in Find jobs, the daily job agent) still need a model in Settings → AI provider; Claude Code does these jobs instead.
+
 ## Self-hosting
 
 To put Dossier on a server, on your own domain with HTTPS, follow the [installation guide](https://github.com/AienTech/dossier/wiki#self-host-on-a-server): a plain Ubuntu server with Docker Compose and Caddy (or Node.js, without Docker), CapRover, Coolify or Dokploy. Give the server at least 2 vCPUs and 2 GB of memory (see [Performance and sizing](#performance-and-sizing)).
@@ -126,6 +199,7 @@ The [wiki](https://github.com/AienTech/dossier/wiki) has what comes after instal
 - **Desktop only:** made for a laptop or desktop browser, not for phones.
 - **Single user:** one password and one profile; there are no accounts.
 - **English interface:** the app itself is in English. Documents can be written in other languages; in the 21 built-in ones, their headings, dates and language levels are in that language too, and in one added with **Other language…** those stay in English.
+- **Claude Code launcher:** the one-click launch from the browser is for macOS and the Terminal app. Elsewhere, paste the prompt the buttons copy.
 - **One instance:** run a single copy of the app per database. The nightly backups, the AI job queue and the PDF browser live inside the app's process.
 
 ## Performance and sizing
